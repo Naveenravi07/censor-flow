@@ -11,7 +11,6 @@ fn main() -> Result<()> {
     let mut args = env::args();
     args.next();
 
-
     let model_path = args.next().expect("Model path not found");
     let host = cpal::default_host();
 
