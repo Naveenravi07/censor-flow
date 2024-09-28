@@ -6,7 +6,7 @@ use cpal::{
 use rodio::DeviceTrait;
 use std::{
     env,
-    sync::{mpsc, Arc, Mutex},
+    sync::{ Arc, Mutex},
     thread,
     time::Duration,
 };
@@ -39,19 +39,16 @@ fn main() -> Result<()> {
         Recognizer::new(&model, supported_in.sample_rate().0 as f32).unwrap(),
     ));
 
-    let (tx, rx) = mpsc::channel::<Vec<i16>>();
     let shared_audio_data = Arc::new(Mutex::new(Vec::new()));
 
     // Build input stream
-    let tx_clone = tx.clone();
+    //
+    let recognizer_clone = Arc::clone(&recognizer);
     let shared_audio_data_in = Arc::clone(&shared_audio_data);
     let input_stream = default_in.build_input_stream(
         &supported_in.config(),
         move |data: &[i16], _: &cpal::InputCallbackInfo| {
-            if let Err(err) = tx_clone.send(data.to_vec()) {
-                eprintln!("Error sending audio data: {:?}", err);
-            }
-            // Update the shared audio data
+            recognizer_clone.lock().unwrap().accept_waveform(data);
             let mut audio = shared_audio_data_in.lock().unwrap();
             *audio = data.to_vec();
         },
@@ -60,7 +57,6 @@ fn main() -> Result<()> {
     )?;
     input_stream.play()?;
 
-    // Build output stream
     let shared_audio_data_out = Arc::clone(&shared_audio_data);
     let output_stream = default_out.build_output_stream(
         &supported_out.config(),
@@ -74,16 +70,6 @@ fn main() -> Result<()> {
         None,
     )?;
     output_stream.play()?;
-
-    let recognizer_clone = Arc::clone(&recognizer);
-    thread::spawn(move || {
-        while let Ok(audio_data) = rx.recv() {
-            let mut reco = recognizer_clone.lock().unwrap();
-            reco.accept_waveform(&audio_data);
-            println!("Partial Result: {:?}", reco.partial_result());
-        }
-    });
-
     thread::sleep(Duration::from_secs(10));
 
     let mut final_result = recognizer.lock().unwrap();
