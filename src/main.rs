@@ -1,16 +1,15 @@
-use std::{
-    env,
-    sync::{mpsc, Arc, Mutex},
-    thread,
-    time::Duration,
-};
-
 use anyhow::Result;
 use cpal::{
     traits::{HostTrait, StreamTrait},
     HostId,
 };
 use rodio::DeviceTrait;
+use std::{
+    env,
+    sync::{mpsc, Arc, Mutex},
+    thread,
+    time::Duration,
+};
 use vosk::{Model, Recognizer};
 
 fn main() -> Result<()> {
@@ -66,7 +65,6 @@ fn main() -> Result<()> {
     let output_stream = default_out.build_output_stream(
         &supported_out.config(),
         move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
-            // Copy shared audio data to the output buffer
             let audio_data = shared_audio_data_out.lock().unwrap();
             for (out_sample, in_sample) in data.iter_mut().zip(audio_data.iter()) {
                 *out_sample = *in_sample;
@@ -96,4 +94,3 @@ fn main() -> Result<()> {
 fn on_err(err: cpal::StreamError) {
     eprintln!("An error occurred in the input/output stream: {:?}", err);
 }
-
