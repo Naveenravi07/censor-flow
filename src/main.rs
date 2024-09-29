@@ -3,12 +3,10 @@ use cpal::{
     traits::{HostTrait, StreamTrait},
     HostId,
 };
+use hound::{SampleFormat, WavSpec, WavWriter};
 use rodio::DeviceTrait;
 use std::{
-    env,
-    sync::{mpsc, Arc, Mutex },
-    thread,
-    time::Duration,
+    env, fs::File, sync::{mpsc, Arc, Mutex}, thread, time::Duration
 };
 use vosk::{Model, Recognizer};
 
@@ -16,6 +14,7 @@ fn main() -> Result<()> {
     let mut args = env::args();
     args.next();
     let model_path = args.next().expect("Model path not found");
+    let output_path = args.next().expect("Output path not found");
     let host = cpal::host_from_id(HostId::Alsa).expect("Failed to unwrap host");
 
     let default_in = host
@@ -39,8 +38,18 @@ fn main() -> Result<()> {
     let recognizer = Arc::new(Mutex::new(
         Recognizer::new(&model, supported_in.sample_rate().0 as f32).unwrap(),
     ));
-
     let (tx, rx) = mpsc::channel::<Vec<i16>>();
+
+    // Create a WAV file to save the output audio
+    let spec = WavSpec {
+        sample_format: SampleFormat::Int,
+        channels: supported_out.channels() as u16,
+        sample_rate: supported_out.sample_rate().0 as u32,
+        bits_per_sample: 16,
+    };
+
+    let output_file = File::create(output_path)?;
+    let mut wav_writer = WavWriter::new(output_file, spec)?;
 
     // Build input stream
     let reco = Arc::clone(&recognizer);
@@ -50,7 +59,7 @@ fn main() -> Result<()> {
         move |data: &[i16], _: &cpal::InputCallbackInfo| {
             tx_clone.send(data.to_vec()).unwrap();
             reco.lock().unwrap().accept_waveform(&data);
-            println!("Result {:?}",reco.lock().unwrap().partial_result());
+            println!("Result {:?}", reco.lock().unwrap().partial_result());
         },
         on_err,
         None,
@@ -64,11 +73,11 @@ fn main() -> Result<()> {
             if let Ok(audio_data) = rx.recv() {
                 for (out_sample, in_sample) in data.iter_mut().zip(audio_data.iter()) {
                     *out_sample = *in_sample;
+                    wav_writer.write_sample(*in_sample).unwrap();
                 }
             } else {
                 eprintln!("Receive error ");
             }
-
         },
         on_err,
         None,
