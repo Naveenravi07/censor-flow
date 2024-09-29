@@ -6,7 +6,7 @@ use cpal::{
 use rodio::DeviceTrait;
 use std::{
     env,
-    sync::{mpsc, Arc, Mutex},
+    sync::{mpsc, Arc, Mutex },
     thread,
     time::Duration,
 };
@@ -43,11 +43,14 @@ fn main() -> Result<()> {
     let (tx, rx) = mpsc::channel::<Vec<i16>>();
 
     // Build input stream
+    let reco = Arc::clone(&recognizer);
     let tx_clone = tx.clone();
     let input_stream = default_in.build_input_stream(
         &supported_in.config(),
         move |data: &[i16], _: &cpal::InputCallbackInfo| {
             tx_clone.send(data.to_vec()).unwrap();
+            reco.lock().unwrap().accept_waveform(&data);
+            println!("Result {:?}",reco.lock().unwrap().partial_result());
         },
         on_err,
         None,
@@ -65,16 +68,16 @@ fn main() -> Result<()> {
             } else {
                 eprintln!("Receive error ");
             }
+
         },
         on_err,
         None,
     )?;
     output_stream.play()?;
 
-
     thread::sleep(Duration::from_secs(10));
-    let mut final_result = recognizer.lock().unwrap();
-    println!("Final Result: {:?}", final_result.result());
+    //let mut final_result = recognizer.lock().unwrap();
+    //println!("Final Result: {:?}", final_result.result());
     Ok(())
 }
 
