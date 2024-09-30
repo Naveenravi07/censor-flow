@@ -5,7 +5,6 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.87"
-cpal = { version = "0.15.3", features = ["jack"] }
 hound = "3.5.1"
 rodio = "0.19.0"
 vosk = "0.2.0"
