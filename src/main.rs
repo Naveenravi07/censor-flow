@@ -1,9 +1,9 @@
 use anyhow::Result;
-use hound::{SampleFormat, WavReader, WavSpec };
+use hound::{SampleFormat, WavReader, WavSpec};
 use std::{env, i16, process::Command, sync::Arc, usize};
 use vosk::{Model, Recognizer};
 
-const BUFFER_LEN: usize = 4096;
+const BUFFER_LEN: usize = 8192;
 
 #[derive(Debug)]
 struct AudioConfig {
@@ -24,7 +24,17 @@ impl AudioConfig {
 
 fn extract_audio(video_path: &str, audio_output: &str) -> Result<(), std::io::Error> {
     Command::new("ffmpeg")
-        .args(&["-i", video_path, "-q:a", "0", "-map", "a", audio_output])
+        .args(&[
+            "-i",
+            video_path,
+            "-acodec",
+            "pcm_s16le",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            audio_output,
+        ])
         .output()?;
     Ok(())
 }
@@ -74,12 +84,14 @@ fn main() -> anyhow::Result<()> {
     let model = Arc::new(Model::new(&model_path).unwrap());
     let mut recognizer = Recognizer::new(&model, au_cfg.sample_rate as f32).unwrap();
 
+
     let _spec = WavSpec {
         sample_format: SampleFormat::Int,
         channels: au_cfg.channels,
         sample_rate: au_cfg.sample_rate,
         bits_per_sample: au_cfg.bits_per_sample,
     };
+
     let _ = process_audio_in_chunks(&output_audio_path, |audio| {
         let state = recognizer.accept_waveform(audio);
         match state {
