@@ -1,6 +1,14 @@
+use aho_corasick::AhoCorasick;
 use anyhow::Result;
 use hound::{SampleFormat, WavReader, WavSpec};
-use std::{env, i16, process::Command, sync::Arc, usize};
+use std::{
+    env,
+    fmt::Debug,
+    fs::{self},
+    path::PathBuf,
+    process::Command,
+    sync::Arc,
+};
 use vosk::{Model, Recognizer};
 
 const BUFFER_LEN: usize = 8192;
@@ -37,6 +45,12 @@ fn extract_audio(video_path: &str, audio_output: &str) -> Result<(), std::io::Er
         ])
         .output()?;
     Ok(())
+}
+
+fn get_badword_list(filepath: &PathBuf) -> Result<Vec<String>> {
+    let file = fs::read_to_string(&filepath).unwrap();
+    let content = file.lines().map(|x| x.to_string()).collect();
+    Ok(content)
 }
 
 fn get_audio_config(file_path: &str) -> Result<AudioConfig> {
@@ -80,6 +94,8 @@ where
 }
 
 fn main() -> anyhow::Result<()> {
+    let start_time = std::time::Instant::now();
+
     let mut args = env::args();
     args.next();
     let model_path = args.next().expect("Model path not found");
@@ -93,6 +109,9 @@ fn main() -> anyhow::Result<()> {
     let model = Arc::new(Model::new(&model_path).unwrap());
     let mut recognizer = Recognizer::new(&model, au_cfg.sample_rate as f32).unwrap();
 
+    let bwordlst = get_badword_list(&PathBuf::from("./lib/badwordslist.txt"))?;
+    let ac = AhoCorasick::new(&bwordlst)?;
+
     let _spec = WavSpec {
         sample_format: SampleFormat::Int,
         channels: au_cfg.channels,
@@ -100,18 +119,25 @@ fn main() -> anyhow::Result<()> {
         bits_per_sample: au_cfg.bits_per_sample,
     };
 
-    let _ = process_audio_in_chunks(&output_audio_path, 100,|audio| {
+    let _ = process_audio_in_chunks(&output_audio_path, 100, |audio| {
         let state = recognizer.accept_waveform(audio);
         match state {
             vosk::DecodingState::Finalized => {
-                println!("Batch completed ");
-                println!("{:?}", recognizer.final_result());
+                println!("\n \n Batch completed ");
+                //println!("{:?}", recognizer.final_result().single());
+
+                let haystack = recognizer.final_result().single().unwrap().text;
+                for bw_match in ac.find_iter(haystack) {
+                    println!("{:?}", bw_match);
+                }
             }
             _ => {}
         }
+
         Ok(())
     })
     .unwrap();
 
+    println!("Process completed, Time Elapsed {:?}", start_time.elapsed());
     Ok(())
 }

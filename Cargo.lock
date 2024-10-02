@@ -122,6 +122,7 @@ dependencies = [
 name = "censor-flow"
 version = "0.1.0"
 dependencies = [
+ "aho-corasick",
  "anyhow",
  "hound",
  "rodio",
