@@ -50,19 +50,28 @@ fn get_audio_config(file_path: &str) -> Result<AudioConfig> {
     Ok(conf)
 }
 
-fn process_audio_in_chunks<F>(file_path: &str, mut cb: F) -> Result<()>
+fn process_audio_in_chunks<F>(file_path: &str, overfolw_rate: u16, mut cb: F) -> Result<()>
 where
     F: FnMut(&Vec<i16>) -> Result<()>,
 {
     let mut buff: Vec<i16> = Vec::with_capacity(BUFFER_LEN);
+    let mut overfow_buf: Vec<i16> = Vec::with_capacity(overfolw_rate as usize);
     let mut reader = WavReader::open(file_path)?;
 
     for sample in reader.samples::<i16>() {
         let sample = sample?;
+
+        if buff.len() == 0 {
+            buff = overfow_buf.clone();
+            overfow_buf.clear();
+        }
+
         buff.push(sample);
 
         if buff.len() == BUFFER_LEN {
             let _ = cb(&buff);
+            let (_, right) = buff.split_at(BUFFER_LEN - (overfolw_rate as usize));
+            overfow_buf = right.to_vec();
             buff.clear();
         }
     }
@@ -84,7 +93,6 @@ fn main() -> anyhow::Result<()> {
     let model = Arc::new(Model::new(&model_path).unwrap());
     let mut recognizer = Recognizer::new(&model, au_cfg.sample_rate as f32).unwrap();
 
-
     let _spec = WavSpec {
         sample_format: SampleFormat::Int,
         channels: au_cfg.channels,
@@ -92,7 +100,7 @@ fn main() -> anyhow::Result<()> {
         bits_per_sample: au_cfg.bits_per_sample,
     };
 
-    let _ = process_audio_in_chunks(&output_audio_path, |audio| {
+    let _ = process_audio_in_chunks(&output_audio_path, 100,|audio| {
         let state = recognizer.accept_waveform(audio);
         match state {
             vosk::DecodingState::Finalized => {
