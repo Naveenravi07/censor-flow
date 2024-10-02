@@ -2,12 +2,7 @@ use aho_corasick::AhoCorasick;
 use anyhow::Result;
 use hound::{SampleFormat, WavReader, WavSpec};
 use std::{
-    env,
-    fmt::Debug,
-    fs::{self},
-    path::PathBuf,
-    process::Command,
-    sync::Arc,
+    any::Any, env, fmt::Debug, fs::{self}, path::PathBuf, process::Command, sync::Arc, thread, usize
 };
 use vosk::{Model, Recognizer};
 
@@ -108,6 +103,7 @@ fn main() -> anyhow::Result<()> {
 
     let model = Arc::new(Model::new(&model_path).unwrap());
     let mut recognizer = Recognizer::new(&model, au_cfg.sample_rate as f32).unwrap();
+    recognizer.set_words(true);
 
     let bwordlst = get_badword_list(&PathBuf::from("./lib/badwordslist.txt"))?;
     let ac = AhoCorasick::new(&bwordlst)?;
@@ -124,12 +120,19 @@ fn main() -> anyhow::Result<()> {
         match state {
             vosk::DecodingState::Finalized => {
                 println!("\n \n Batch completed ");
-                //println!("{:?}", recognizer.final_result().single());
 
-                let haystack = recognizer.final_result().single().unwrap().text;
-                for bw_match in ac.find_iter(haystack) {
-                    println!("{:?}", bw_match);
+                let result = recognizer.final_result().single().unwrap();
+                let words = result.result;
+                let haystack = result.text;
+                
+                println!("{}", haystack);
+                
+                let mut bad_words : Vec<u32> = Vec::new();
+                for word in ac.find_iter(haystack) {
+                    bad_words.push(word.pattern().as_u32());
                 }
+
+                println!("Badwords detected : {:?}",bad_words);
             }
             _ => {}
         }
