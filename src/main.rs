@@ -1,8 +1,9 @@
 use aho_corasick::AhoCorasick;
 use anyhow::Result;
 use hound::{SampleFormat, WavReader, WavSpec};
+use rodio::cpal::FromSample;
 use std::{
-    any::Any, env, fmt::Debug, fs::{self}, path::PathBuf, process::Command, sync::Arc, thread, usize
+    env, fs::{self}, path::PathBuf, process::Command, sync::Arc, thread, usize
 };
 use vosk::{Model, Recognizer};
 
@@ -13,6 +14,13 @@ struct AudioConfig {
     sample_rate: u32,
     channels: u16,
     bits_per_sample: u16,
+}
+
+#[derive(Debug,Clone)]
+struct Bword {
+    start: usize,
+    end: usize,
+    pattern: u32,
 }
 
 impl AudioConfig {
@@ -88,6 +96,10 @@ where
     Ok(())
 }
 
+fn beep_bad_words(bads: Vec<Bword>, audio: Vec<i16>) -> Result<()> {
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let start_time = std::time::Instant::now();
 
@@ -117,22 +129,33 @@ fn main() -> anyhow::Result<()> {
 
     let _ = process_audio_in_chunks(&output_audio_path, 100, |audio| {
         let state = recognizer.accept_waveform(audio);
+        let mut bad_words: Vec<Bword> = Vec::new();
+
         match state {
             vosk::DecodingState::Finalized => {
                 println!("\n \n Batch completed ");
 
                 let result = recognizer.final_result().single().unwrap();
-                let words = result.result;
                 let haystack = result.text;
-                
                 println!("{}", haystack);
-                
-                let mut bad_words : Vec<u32> = Vec::new();
+
                 for word in ac.find_iter(haystack) {
-                    bad_words.push(word.pattern().as_u32());
+                    let bad_w = Bword {
+                        start: word.start(),
+                        end: word.end(),
+                        pattern: word.pattern().as_u32(),
+                    };
+                    bad_words.push(bad_w);
                 }
 
-                println!("Badwords detected : {:?}",bad_words);
+                println!("Badwords detected : {:?}", bad_words);
+
+                let bad_words_clone = bad_words.clone();
+                let audio_clone = audio.clone();
+
+                thread::spawn(move || {
+                    beep_bad_words(bad_words_clone, audio_clone).unwrap();
+                });
             }
             _ => {}
         }
@@ -144,3 +167,4 @@ fn main() -> anyhow::Result<()> {
     println!("Process completed, Time Elapsed {:?}", start_time.elapsed());
     Ok(())
 }
+
