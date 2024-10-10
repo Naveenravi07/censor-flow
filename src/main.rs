@@ -1,9 +1,7 @@
 use aho_corasick::AhoCorasick;
 use anyhow::Result;
 use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
-use std::cell::RefCell;
 use std::io::BufWriter;
-use std::rc::Rc;
 use std::{
     env,
     fs::{self},
@@ -167,13 +165,14 @@ fn main() -> anyhow::Result<()> {
     let file = std::fs::File::create(&censored_audio_path).unwrap();
     let buf_writer = BufWriter::new(file);
     let mut wav_writer = WavWriter::new(buf_writer, spec).unwrap();
+    let mut idx = 0;
 
-    let idx = Rc::new(RefCell::new(0));
     let _ = process_audio_in_chunks(&output_audio_path, 800, |audio| {
-        let state = recognizer.accept_waveform(audio);
+        let state = recognizer.accept_waveform(&audio);
 
         match state {
             vosk::DecodingState::Finalized => {
+                idx += 1;
                 println!("\n \n Batch completed ");
 
                 let mut bad_words: Vec<Bword> = Vec::new();
@@ -192,26 +191,28 @@ fn main() -> anyhow::Result<()> {
 
                 println!("Bad words detected: {:?}", bad_words);
 
+                let fpp_org = PathBuf::from(&format!("/home/shastri/tmp/c_flow/org/{}.wav", idx));
+                let mut wav_writer_org = WavWriter::create(&fpp_org, spec).unwrap();
+                for &org in audio {
+                    wav_writer_org.write_sample(org).unwrap();
+                }
+                wav_writer_org.flush().unwrap();
 
                 beep_bad_words(bad_words, audio.to_vec(), &au_cfg, |censored_audio| {
-                    let curr_idx = *idx.borrow();
-                    *idx.borrow_mut() = curr_idx + 1;
                     println!(
                         "Writing chunk {}: original size = {}, censored size = {}",
-                        curr_idx,
+                        idx,
                         audio.len(),
                         censored_audio.len()
                     );
 
-                    let fpp =
-                        PathBuf::from(&format!("/home/shastri/tmp/c_flow/dbg/{}.wav", curr_idx));
+                    let fpp = PathBuf::from(&format!("/home/shastri/tmp/c_flow/dbg/{}.wav", idx));
                     let mut wav_writer_dbg = WavWriter::create(&fpp, spec).unwrap();
 
                     for &sample in censored_audio {
                         wav_writer.write_sample(sample).unwrap();
                         wav_writer_dbg.write_sample(sample).unwrap();
                     }
-
                     wav_writer_dbg.flush().unwrap();
                     wav_writer.flush().unwrap();
 
