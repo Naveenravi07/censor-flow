@@ -1,6 +1,9 @@
 use aho_corasick::AhoCorasick;
 use anyhow::Result;
 use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
+use std::cell::RefCell;
+use std::io::BufWriter;
+use std::rc::Rc;
 use std::{
     env,
     fs::{self},
@@ -8,10 +11,9 @@ use std::{
     process::Command,
     sync::Arc,
 };
-use std::io::BufWriter;
 use vosk::{Model, Recognizer};
 
-const BUFFER_LEN: usize = 8192;
+const BUFFER_LEN: usize = 16000;
 
 #[derive(Debug, Clone)]
 struct AudioConfig {
@@ -89,7 +91,6 @@ where
 
         buff.push(sample);
 
-        // Process the full buffer
         if buff.len() == BUFFER_LEN {
             let _ = cb(&buff);
             let (_, right) = buff.split_at(BUFFER_LEN - (overflow_rate as usize));
@@ -98,7 +99,6 @@ where
         }
     }
 
-    // Process any remaining samples in the buffer after the loop
     if !buff.is_empty() {
         let _ = cb(&buff);
     }
@@ -119,7 +119,10 @@ where
         let start_sample = (bword.start as u32 * au_cfg.sample_rate) / 1000;
         let end_sample = (bword.end as u32 * au_cfg.sample_rate) / 1000;
 
-        println!("Beeping between samples {} and {}", start_sample, end_sample);
+        println!(
+            "Beeping between samples {} and {}",
+            start_sample, end_sample
+        );
 
         for i in start_sample..end_sample {
             if i < audio.len() as u32 {
@@ -133,7 +136,6 @@ where
     bads.clear();
     Ok(())
 }
-
 
 fn main() -> anyhow::Result<()> {
     let start_time = std::time::Instant::now();
@@ -166,8 +168,8 @@ fn main() -> anyhow::Result<()> {
     let buf_writer = BufWriter::new(file);
     let mut wav_writer = WavWriter::new(buf_writer, spec).unwrap();
 
-
-    let _ = process_audio_in_chunks(&output_audio_path, 100, |audio| {
+    let idx = Rc::new(RefCell::new(0));
+    let _ = process_audio_in_chunks(&output_audio_path, 800, |audio| {
         let state = recognizer.accept_waveform(audio);
 
         match state {
@@ -188,13 +190,31 @@ fn main() -> anyhow::Result<()> {
                     bad_words.push(bad_w);
                 }
 
-                println!("Bad words detected : {:?}", bad_words);
+                println!("Bad words detected: {:?}", bad_words);
+
+
                 beep_bad_words(bad_words, audio.to_vec(), &au_cfg, |censored_audio| {
-                    println!("Writing chunk: original size = {}, censored size = {}",audio.len(), censored_audio.len());
-                    for sample in censored_audio {
-                        wav_writer.write_sample(*sample).unwrap();
+                    let curr_idx = *idx.borrow();
+                    *idx.borrow_mut() = curr_idx + 1;
+                    println!(
+                        "Writing chunk {}: original size = {}, censored size = {}",
+                        curr_idx,
+                        audio.len(),
+                        censored_audio.len()
+                    );
+
+                    let fpp =
+                        PathBuf::from(&format!("/home/shastri/tmp/c_flow/dbg/{}.wav", curr_idx));
+                    let mut wav_writer_dbg = WavWriter::create(&fpp, spec).unwrap();
+
+                    for &sample in censored_audio {
+                        wav_writer.write_sample(sample).unwrap();
+                        wav_writer_dbg.write_sample(sample).unwrap();
                     }
+
+                    wav_writer_dbg.flush().unwrap();
                     wav_writer.flush().unwrap();
+
                     Ok(())
                 })
                 .unwrap();
