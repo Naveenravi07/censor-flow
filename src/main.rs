@@ -1,44 +1,23 @@
-use aho_corasick::AhoCorasick;
-use anyhow::Result;
-use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
-use std::{
-    env,
-    fs::{self},
-    path::PathBuf,
-    process::Command,
-    sync::Arc,
-};
-use std::io::BufWriter;
+use anyhow::{Context, Result};
+use hound::{SampleFormat, WavReader, WavWriter};
+use std::collections::VecDeque;
+use std::f32::consts::PI;
+use std::fs::{self, File};
+use std::io::{BufReader, Read};
+use std::path::PathBuf;
+use std::process::Command;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use vosk::{Model, Recognizer};
 
-const BUFFER_LEN: usize = 8192;
-
-#[derive(Debug, Clone)]
-struct AudioConfig {
-    sample_rate: u32,
-    channels: u16,
-    bits_per_sample: u16,
-}
-
-#[derive(Debug, Clone)]
-struct Bword {
-    start: usize,
-    end: usize,
-    pattern: u32,
-}
-
-impl AudioConfig {
-    fn new(sample_rate: u32, channels: u16, bits_per_sample: u16) -> Self {
-        AudioConfig {
-            sample_rate,
-            channels,
-            bits_per_sample,
-        }
-    }
+fn get_badword_list(filepath: &PathBuf) -> Result<Vec<String>> {
+    let file = fs::read_to_string(filepath)?;
+    Ok(file.lines().map(|x| x.to_string()).collect())
 }
 
 fn extract_audio(video_path: &str, audio_output: &str) -> Result<(), std::io::Error> {
-    Command::new("ffmpeg")
+    println!("Extracting audio from video: {}", video_path);
+    let output = Command::new("ffmpeg")
         .args(&[
             "-i",
             video_path,
@@ -51,162 +30,161 @@ fn extract_audio(video_path: &str, audio_output: &str) -> Result<(), std::io::Er
             audio_output,
         ])
         .output()?;
+
+    if !output.status.success() {
+        println!("FFmpeg stderr: {}", String::from_utf8_lossy(&output.stderr));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "FFmpeg command failed",
+        ));
+    }
+    println!("Audio extracted successfully");
     Ok(())
 }
 
-fn get_badword_list(filepath: &PathBuf) -> Result<Vec<String>> {
-    let file = fs::read_to_string(&filepath).unwrap();
-    let content = file.lines().map(|x| x.to_string()).collect();
-    Ok(content)
-}
-
-fn get_audio_config(file_path: &str) -> Result<AudioConfig> {
-    let reader = WavReader::open(file_path)?;
-    let audio_spec = reader.spec();
-    let conf = AudioConfig::new(
-        audio_spec.sample_rate,
-        audio_spec.channels,
-        audio_spec.bits_per_sample,
-    );
-    Ok(conf)
-}
-
-fn process_audio_in_chunks<F>(file_path: &str, overflow_rate: u16, mut cb: F) -> Result<()>
-where
-    F: FnMut(&Vec<i16>) -> Result<()>,
-{
-    let mut buff: Vec<i16> = Vec::with_capacity(BUFFER_LEN);
-    let mut overflow_buf: Vec<i16> = Vec::with_capacity(overflow_rate as usize);
-    let mut reader = WavReader::open(file_path)?;
-
-    for sample in reader.samples::<i16>() {
-        let sample = sample?;
-
-        if buff.len() == 0 {
-            buff = overflow_buf.clone();
-            overflow_buf.clear();
-        }
-
-        buff.push(sample);
-
-        // Process the full buffer
-        if buff.len() == BUFFER_LEN {
-            let _ = cb(&buff);
-            let (_, right) = buff.split_at(BUFFER_LEN - (overflow_rate as usize));
-            overflow_buf = right.to_vec();
-            buff.clear();
-        }
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() != 5 {
+        eprintln!(
+            "Usage: {} <input_video> <extracted_audio> <output_censored_audio>",
+            args[0]
+        );
+        std::process::exit(1);
     }
 
-    // Process any remaining samples in the buffer after the loop
-    if !buff.is_empty() {
-        let _ = cb(&buff);
-    }
+    let modal_path = &args[1];
+    let input_video = &args[2];
+    let extracted_audio = &args[3];
+    let output_censored_audio = &args[4];
 
-    Ok(())
-}
-
-fn beep_bad_words<F>(
-    mut bads: Vec<Bword>,
-    mut audio: Vec<i16>,
-    au_cfg: &AudioConfig,
-    mut cb: F,
-) -> Result<()>
-where
-    F: FnMut(&Vec<i16>) -> Result<()>,
-{
-    for bword in &bads {
-        let start_sample = (bword.start as u32 * au_cfg.sample_rate) / 1000;
-        let end_sample = (bword.end as u32 * au_cfg.sample_rate) / 1000;
-
-        println!("Beeping between samples {} and {}", start_sample, end_sample);
-
-        for i in start_sample..end_sample {
-            if i < audio.len() as u32 {
-                audio[i as usize] = audio[i as usize];
-            } else {
-                println!("Warning: Out of bounds access at sample {}", i);
-            }
-        }
-    }
-    let _ = cb(&audio);
-    bads.clear();
-    Ok(())
-}
-
-
-fn main() -> anyhow::Result<()> {
-    let start_time = std::time::Instant::now();
-
-    let mut args = env::args();
-    args.next();
-    let model_path = args.next().expect("Model path not found");
-    let video_path = args.next().expect("Video path not found");
-    let output_audio_path = args.next().expect("Output path not found");
-    let censored_audio_path = args.next().expect("Censored Output path not found");
-
-    extract_audio(&video_path, &output_audio_path)?;
-    let au_cfg = get_audio_config(&output_audio_path)?;
-    println!("got audio config : {:?}", au_cfg);
-
-    let model = Arc::new(Model::new(&model_path).unwrap());
-    let mut recognizer = Recognizer::new(&model, au_cfg.sample_rate as f32).unwrap();
-    recognizer.set_words(true);
+    extract_audio(input_video, extracted_audio)?;
 
     let bwordlst = get_badword_list(&PathBuf::from("./lib/badwordslist.txt"))?;
-    let ac = AhoCorasick::new(&bwordlst)?;
+    println!("Loaded {} bad words", bwordlst.len());
 
-    let spec = WavSpec {
-        sample_format: SampleFormat::Int,
-        channels: au_cfg.channels,
-        sample_rate: au_cfg.sample_rate,
-        bits_per_sample: au_cfg.bits_per_sample,
-    };
-    let file = std::fs::File::create(&censored_audio_path).unwrap();
-    let buf_writer = BufWriter::new(file);
-    let mut wav_writer = WavWriter::new(buf_writer, spec).unwrap();
+    let model = Model::new(modal_path).context("Failed to load Vosk model")?;
+    println!("Loaded Vosk model");
 
+    let mut recognizer = Recognizer::new_with_grammar(&model, 16000.0, &bwordlst).unwrap();
+    let bad_times: Arc<Mutex<VecDeque<(f32, f32)>>> = Arc::new(Mutex::new(VecDeque::new()));
 
-    let _ = process_audio_in_chunks(&output_audio_path, 100, |audio| {
-        let state = recognizer.accept_waveform(audio);
+    let file = File::open(extracted_audio).context("Failed to open extracted audio file")?;
+    let mut reader = BufReader::new(file);
+    let mut buffer = [0; 4096];
+    let mut total_samples = 0;
+    let mut chunks_processed = 0;
 
-        match state {
-            vosk::DecodingState::Finalized => {
-                println!("\n \n Batch completed ");
+    println!("Processing audio...");
+    while let Ok(n) = reader.read(&mut buffer) {
+        if n == 0 {
+            break;
+        }
+        let samples: Vec<i16> = buffer[..n]
+            .chunks_exact(2)
+            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect();
 
-                let mut bad_words: Vec<Bword> = Vec::new();
-                let result = recognizer.final_result().single().unwrap();
-                let haystack = result.text;
-                println!("{}", haystack);
+        total_samples += samples.len();
+        chunks_processed += 1;
 
-                for word in ac.find_iter(haystack) {
-                    let bad_w = Bword {
-                        start: word.start(),
-                        end: word.end(),
-                        pattern: word.pattern().as_u32(),
-                    };
-                    bad_words.push(bad_w);
-                }
-
-                println!("Bad words detected : {:?}", bad_words);
-                beep_bad_words(bad_words, audio.to_vec(), &au_cfg, |censored_audio| {
-                    println!("Writing chunk: original size = {}, censored size = {}",audio.len(), censored_audio.len());
-                    for sample in censored_audio {
-                        wav_writer.write_sample(*sample).unwrap();
+        if let vosk::DecodingState::Finalized = recognizer.accept_waveform(&samples) {
+            let result = recognizer.final_result().single().unwrap();
+            let timelines: Vec<(f32, f32)> = result
+                .result
+                .iter()
+                .filter_map(|w| {
+                    if w.conf > 0.9 {
+                        Some((w.start, w.end))
+                    } else {
+                        None
                     }
-                    wav_writer.flush().unwrap();
-                    Ok(())
                 })
-                .unwrap();
-            }
-            _ => {}
+                .collect();
+            println!("\nDetected bad words: {:?}", result);
+            println!("Timeline : {:?}", timelines);
+            bad_times.lock().await.extend(timelines);
         }
 
-        Ok(())
-    })
-    .unwrap();
-    wav_writer.finalize().unwrap();
+        if chunks_processed % 100 == 0 {
+            println!(
+                "Processed {} chunks ({} samples)",
+                chunks_processed, total_samples
+            );
+        }
+    }
 
-    println!("Process completed, Time Elapsed {:?}", start_time.elapsed());
+    println!(
+        "Finished processing. Total samples: {}, Chunks processed: {}",
+        total_samples, chunks_processed
+    );
+
+    let censored_times = bad_times.lock().await.drain(..).collect::<Vec<_>>();
+    println!("Detected {} censored segments", censored_times.len());
+
+    censor_audio_with_beep(extracted_audio, output_censored_audio, &censored_times)?;
+
+    println!(
+        "Finished censoring. Output written to: {}",
+        output_censored_audio
+    );
+
     Ok(())
 }
+
+fn generate_beep(sample_rate: u32, duration: f32, frequency: f32) -> Vec<i16> {
+    let num_samples = (duration * sample_rate as f32) as usize;
+    (0..num_samples)
+        .map(|i| {
+            let t = i as f32 / sample_rate as f32;
+            (i16::MAX as f32 * (2.0 * PI * frequency * t).sin()) as i16
+        })
+        .collect()
+}
+
+fn censor_audio_with_beep(
+    input_file: &str,
+    output_file: &str,
+    censor_times: &[(f32, f32)],
+) -> Result<()> {
+    let mut reader = WavReader::open(input_file)?;
+    let spec = reader.spec();
+    let mut writer = WavWriter::create(output_file, spec)?;
+
+    let sample_rate = spec.sample_rate;
+    let mut censor_samples = censor_times
+        .iter()
+        .map(|&(start, end)| {
+            (
+                (start * sample_rate as f32).round() as usize,
+                (end * sample_rate as f32).round() as usize,
+            )
+        })
+        .collect::<Vec<_>>();
+    censor_samples.sort_unstable_by_key(|&(start, _)| start);
+
+    let beep_frequency = 1000.0;
+    let beep = generate_beep(sample_rate, 0.5, beep_frequency);
+
+    let mut current_censor = 0;
+    let mut beep_index = 0;
+
+    for (i, sample) in reader.samples::<i16>().enumerate() {
+        let sample = sample?;
+        if current_censor < censor_samples.len() && i >= censor_samples[current_censor].0 {
+            if i < censor_samples[current_censor].1 {
+                writer.write_sample(beep[beep_index])?;
+                beep_index = (beep_index + 1) % beep.len();
+            } else {
+                writer.write_sample(sample)?;
+                current_censor += 1;
+                beep_index = 0;
+            }
+        } else {
+            writer.write_sample(sample)?;
+        }
+    }
+
+    Ok(())
+}
+
